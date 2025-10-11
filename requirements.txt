@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+pydantic
+motor
+google-generativeai
+python-multipart
+python-dotenv
+pymongo
+requests
+email-validator
+firebase-admin
