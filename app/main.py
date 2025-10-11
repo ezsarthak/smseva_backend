@@ -598,3 +598,158 @@ async def health_check():
     Health check endpoint
     """
     return {"status": "healthy", "timestamp": datetime.now().strftime("%H:%M %d-%m-%Y")}
+
+# Department management endpoints
+@app.get("/departments", response_model=List[Department])
+async def get_departments():
+    """
+    Get all active departments
+    """
+    try:
+        departments = await get_all_departments()
+        return departments
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching departments: {str(e)}")
+
+@app.post("/departments", response_model=Department)
+async def create_department_endpoint(department_data: dict):
+    """
+    Create a new department
+    """
+    try:
+        from .database import create_department
+        department = await create_department(department_data)
+        return department
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error creating department: {str(e)}")
+
+# Worker management endpoints
+@app.get("/workers", response_model=List[WorkerProfile])
+async def get_workers(department_id: str = None):
+    """
+    Get all workers, optionally filtered by department
+    """
+    try:
+        if department_id:
+            workers = await get_workers_by_department(department_id)
+        else:
+            workers = await get_all_workers()
+        return workers
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching workers: {str(e)}")
+
+@app.get("/workers/{email}", response_model=WorkerProfile)
+async def get_worker_by_email_endpoint(email: str):
+    """
+    Get worker profile by email
+    """
+    try:
+        worker = await get_worker_by_email(email)
+        if not worker:
+            raise HTTPException(status_code=404, detail="Worker not found")
+        return worker
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching worker: {str(e)}")
+
+# Issue assignment endpoints
+@app.post("/assignments", response_model=AssignmentResponse)
+async def assign_issue(assignment_request: AssignmentRequest, assigned_by: str):
+    """
+    Assign an issue to a worker
+    """
+    try:
+        # Verify the issue exists
+        issues = await get_all_issues()
+        issue = next((i for i in issues if i.ticket_id == assignment_request.ticket_id), None)
+        if not issue:
+            raise HTTPException(status_code=404, detail="Issue not found")
+        
+        # Verify the worker exists
+        worker = await get_worker_by_email(assignment_request.assigned_to)
+        if not worker:
+            raise HTTPException(status_code=404, detail="Worker not found")
+        
+        # Check if issue is already assigned
+        existing_assignment = await get_assignment_by_ticket(assignment_request.ticket_id)
+        if existing_assignment:
+            raise HTTPException(status_code=400, detail="Issue is already assigned")
+        
+        # Create assignment
+        assignment_data = {
+            "ticket_id": assignment_request.ticket_id,
+            "assigned_to": assignment_request.assigned_to,
+            "assigned_by": assigned_by,
+            "assigned_at": datetime.now().strftime("%H:%M %d-%m-%Y"),
+            "status": "assigned",
+            "notes": assignment_request.notes
+        }
+        
+        assignment = await create_issue_assignment(assignment_data)
+        
+        # Update issue status to in_progress
+        await update_issue_status_in_db(assignment_request.ticket_id, "in_progress", assigned_by)
+        
+        # Send notification email
+        await email_service.send_assignment_notification(
+            assignment_request.ticket_id,
+            assignment_request.assigned_to,
+            assigned_by,
+            assignment_request.notes
+        )
+        
+        return AssignmentResponse(
+            message="Issue assigned successfully",
+            assignment_id=assignment.id,
+            ticket_id=assignment.ticket_id,
+            assigned_to=assignment.assigned_to,
+            assigned_by=assignment.assigned_by,
+            assigned_at=assignment.assigned_at,
+            status=assignment.status
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error assigning issue: {str(e)}")
+
+@app.get("/assignments/worker/{worker_email}", response_model=List[IssueAssignment])
+async def get_worker_assignments(worker_email: str):
+    """
+    Get all assignments for a specific worker
+    """
+    try:
+        assignments = await get_assignments_by_worker(worker_email)
+        return assignments
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching assignments: {str(e)}")
+
+@app.put("/assignments/{ticket_id}/status")
+async def update_assignment_status_endpoint(ticket_id: str, status: str, notes: str = None):
+    """
+    Update assignment status
+    """
+    try:
+        assignment = await update_assignment_status(ticket_id, status, notes)
+        if not assignment:
+            raise HTTPException(status_code=404, detail="Assignment not found")
+        
+        return {
+            "message": "Assignment status updated successfully",
+            "ticket_id": ticket_id,
+            "status": status,
+            "updated_at": datetime.now().strftime("%H:%M %d-%m-%Y")
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error updating assignment: {str(e)}")
+
+# Initialize default departments on startup
+@app.on_event("startup")
+async def startup_event():
+    """
+    Initialize default departments on application startup
+    """
+    await auth_service.initialize_default_departments()
