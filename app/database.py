@@ -2,7 +2,7 @@ import motor.motor_asyncio
 import hashlib
 import re
 from typing import Optional, List
-from models import IssueDB, Department, WorkerProfile, IssueAssignment, UserRole
+from .models import IssueDB, Department, WorkerProfile, IssueAssignment, UserRole
 import os
 from dotenv import load_dotenv
 from difflib import SequenceMatcher
