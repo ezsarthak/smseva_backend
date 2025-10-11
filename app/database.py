@@ -2,11 +2,13 @@ import motor.motor_asyncio
 import hashlib
 import re
 from typing import Optional, List
-from models import IssueDB
+from models import IssueDB, Department, WorkerProfile, IssueAssignment, UserRole
 import os
-# from dotenv import load_dotenv
+from dotenv import load_dotenv
 from difflib import SequenceMatcher
 from datetime import datetime
+
+load_dotenv()
 
 # Database configuration
 MONGODB_URL = os.getenv("MONGODB_URL", "mongodb://localhost:27017")
@@ -136,6 +138,10 @@ async def is_similar_issue(new_text: str, new_location: Optional[dict], new_cate
 
 # In-memory storage for development when MongoDB is not available
 _in_memory_issues = []
+_in_memory_departments = []
+_in_memory_workers = []
+_in_memory_assignments = []
+_in_memory_users = []
 
 async def find_existing_issue(content_hash: str, text: str = None, location: dict = None, category: str = None, user_email: str = None) -> Optional[IssueDB]:
     """Find existing issue by content hash or similarity"""
@@ -230,6 +236,106 @@ async def update_existing_issue(issue_id: str, new_email: str) -> IssueDB:
             issue["issue_count"] = issue.get("issue_count", 1) + 1
             return IssueDB(**issue)
     return None
+
+async def update_issue_status_in_db(ticket_id: str, new_status: str, updated_by_email: str) -> Optional[dict]:
+    """Update issue status by ticket ID"""
+    print(f"Database: Updating status for ticket {ticket_id} to {new_status} by {updated_by_email}")
+    
+    if issues_collection is not None:
+        try:
+            from bson import ObjectId
+            print("Database: Using MongoDB")
+            
+            # Find the issue first to get current status
+            issue_data = await issues_collection.find_one({"ticket_id": ticket_id})
+            if not issue_data:
+                print(f"Database: No issue found with ticket_id {ticket_id}")
+                return None
+            
+            previous_status = issue_data.get("status", "unknown")
+            print(f"Database: Previous status was {previous_status}")
+            
+            # Prepare update data with timestamp tracking and email
+            update_data = {
+                "status": new_status,
+                "updated_at": datetime.now().strftime("%H:%M %d-%m-%Y"),
+                "updated_by_email": updated_by_email
+            }
+            
+            # Track when status is changed to in_progress
+            if new_status == "in_progress" and previous_status != "in_progress":
+                update_data["in_progress_at"] = datetime.now().strftime("%H:%M %d-%m-%Y")
+            
+            # Track when status is changed to completed
+            if new_status == "completed" and previous_status != "completed":
+                update_data["completed_at"] = datetime.now().strftime("%H:%M %d-%m-%Y")
+            
+            # Update the status
+            result = await issues_collection.find_one_and_update(
+                {"ticket_id": ticket_id},
+                {"$set": update_data},
+                return_document=True
+            )
+            
+            if result:
+                # Convert ObjectId to string
+                if "_id" in result:
+                    result["_id"] = str(result["_id"])
+                result["previous_status"] = previous_status
+                print(f"Database: Successfully updated in MongoDB")
+                return result
+                
+        except Exception as e:
+            print(f"Database: Error updating issue status in MongoDB: {e}")
+    
+    # Use in-memory storage
+    print("Database: Using in-memory storage")
+    for issue in _in_memory_issues:
+        if issue.get("ticket_id") == ticket_id:
+            previous_status = issue.get("status", "unknown")
+            issue["status"] = new_status
+            issue["updated_at"] = datetime.now().strftime("%H:%M %d-%m-%Y")
+            issue["updated_by_email"] = updated_by_email
+            
+            # Track when status is changed to in_progress
+            if new_status == "in_progress" and previous_status != "in_progress":
+                issue["in_progress_at"] = datetime.now().strftime("%H:%M %d-%m-%Y")
+            
+            # Track when status is changed to completed
+            if new_status == "completed" and previous_status != "completed":
+                issue["completed_at"] = datetime.now().strftime("%H:%M %d-%m-%Y")
+            
+            print(f"Database: Successfully updated in memory")
+            return {
+                **issue,
+                "previous_status": previous_status
+            }
+    
+    print(f"Database: No issue found in memory with ticket_id {ticket_id}")
+    return None
+
+async def get_issues_by_user_email(user_email: str) -> list[IssueDB]:
+    """Get all issues created by a specific user email"""
+    if issues_collection is not None:
+        try:
+            # Find issues where the user's email is in the users array
+            cursor = issues_collection.find({"users": user_email})
+            issues = []
+            async for issue in cursor:
+                # Convert ObjectId to string
+                if "_id" in issue:
+                    issue["_id"] = str(issue["_id"])
+                issues.append(IssueDB(**issue))
+            return issues
+        except Exception as e:
+            print(f"Error querying MongoDB for user issues: {e}")
+    
+    # Use in-memory storage
+    user_issues = []
+    for issue in _in_memory_issues:
+        if "users" in issue and user_email in issue["users"]:
+            user_issues.append(IssueDB(**issue))
+    return user_issues
 
 async def get_all_issues() -> list[IssueDB]:
     """Get all issues from database"""
@@ -336,4 +442,289 @@ async def mark_issue_completion(ticket_id: str, completion_type: str, completed_
             return issue
     
     print(f"Database: No issue found in memory with ticket_id {ticket_id}")
+    return None
+
+# Department management functions
+async def create_department(department_data: dict) -> Department:
+    """Create a new department"""
+    if departments_collection is not None:
+        try:
+            result = await departments_collection.insert_one(department_data)
+            department_data["_id"] = str(result.inserted_id)
+        except Exception as e:
+            print(f"Error inserting department to MongoDB: {e}")
+            import uuid
+            department_data["_id"] = str(uuid.uuid4())
+            _in_memory_departments.append(department_data)
+    else:
+        import uuid
+        department_data["_id"] = str(uuid.uuid4())
+        _in_memory_departments.append(department_data)
+    return Department(**department_data)
+
+async def get_all_departments() -> List[Department]:
+    """Get all active departments"""
+    if departments_collection is not None:
+        try:
+            cursor = departments_collection.find({"is_active": True})
+            departments = []
+            async for dept in cursor:
+                if "_id" in dept:
+                    dept["_id"] = str(dept["_id"])
+                departments.append(Department(**dept))
+            return departments
+        except Exception as e:
+            print(f"Error querying departments from MongoDB: {e}")
+    
+    return [Department(**dept) for dept in _in_memory_departments if dept.get("is_active", True)]
+
+async def get_department_by_id(department_id: str) -> Optional[Department]:
+    """Get department by ID"""
+    if departments_collection is not None:
+        try:
+            from bson import ObjectId
+            dept_data = await departments_collection.find_one({"_id": ObjectId(department_id)})
+            if dept_data:
+                if "_id" in dept_data:
+                    dept_data["_id"] = str(dept_data["_id"])
+                return Department(**dept_data)
+        except Exception as e:
+            print(f"Error querying department from MongoDB: {e}")
+    
+    for dept in _in_memory_departments:
+        if dept.get("_id") == department_id:
+            return Department(**dept)
+    return None
+
+# Worker management functions
+async def create_worker_profile(worker_data: dict) -> WorkerProfile:
+    """Create a new worker profile"""
+    if workers_collection is not None:
+        try:
+            result = await workers_collection.insert_one(worker_data)
+            worker_data["_id"] = str(result.inserted_id)
+        except Exception as e:
+            print(f"Error inserting worker to MongoDB: {e}")
+            import uuid
+            worker_data["_id"] = str(uuid.uuid4())
+            _in_memory_workers.append(worker_data)
+    else:
+        import uuid
+        worker_data["_id"] = str(uuid.uuid4())
+        _in_memory_workers.append(worker_data)
+    return WorkerProfile(**worker_data)
+
+async def get_all_workers() -> List[WorkerProfile]:
+    """Get all active workers"""
+    if workers_collection is not None:
+        try:
+            cursor = workers_collection.find({"is_active": True})
+            workers = []
+            async for worker in cursor:
+                if "_id" in worker:
+                    worker["_id"] = str(worker["_id"])
+                workers.append(WorkerProfile(**worker))
+            return workers
+        except Exception as e:
+            print(f"Error querying workers from MongoDB: {e}")
+    
+    return [WorkerProfile(**worker) for worker in _in_memory_workers if worker.get("is_active", True)]
+
+async def get_workers_by_department(department_id: str) -> List[WorkerProfile]:
+    """Get workers by department"""
+    if workers_collection is not None:
+        try:
+            cursor = workers_collection.find({"department_id": department_id, "is_active": True})
+            workers = []
+            async for worker in cursor:
+                if "_id" in worker:
+                    worker["_id"] = str(worker["_id"])
+                workers.append(WorkerProfile(**worker))
+            return workers
+        except Exception as e:
+            print(f"Error querying workers by department from MongoDB: {e}")
+    
+    return [WorkerProfile(**worker) for worker in _in_memory_workers 
+            if worker.get("department_id") == department_id and worker.get("is_active", True)]
+
+async def get_worker_by_email(email: str) -> Optional[WorkerProfile]:
+    """Get worker by email"""
+    if workers_collection is not None:
+        try:
+            worker_data = await workers_collection.find_one({"email": email})
+            if worker_data:
+                if "_id" in worker_data:
+                    worker_data["_id"] = str(worker_data["_id"])
+                return WorkerProfile(**worker_data)
+        except Exception as e:
+            print(f"Error querying worker from MongoDB: {e}")
+    
+    for worker in _in_memory_workers:
+        if worker.get("email") == email:
+            return WorkerProfile(**worker)
+    return None
+
+async def update_worker_profile(email: str, update_data: dict) -> Optional[WorkerProfile]:
+    """Update worker profile"""
+    if workers_collection is not None:
+        try:
+            update_data["updated_at"] = datetime.now().strftime("%H:%M %d-%m-%Y")
+            result = await workers_collection.find_one_and_update(
+                {"email": email},
+                {"$set": update_data},
+                return_document=True
+            )
+            if result:
+                if "_id" in result:
+                    result["_id"] = str(result["_id"])
+                return WorkerProfile(**result)
+        except Exception as e:
+            print(f"Error updating worker in MongoDB: {e}")
+    
+    for worker in _in_memory_workers:
+        if worker.get("email") == email:
+            worker.update(update_data)
+            worker["updated_at"] = datetime.now().strftime("%H:%M %d-%m-%Y")
+            return WorkerProfile(**worker)
+    return None
+
+# Issue assignment functions
+async def create_issue_assignment(assignment_data: dict) -> IssueAssignment:
+    """Create a new issue assignment"""
+    if assignments_collection is not None:
+        try:
+            result = await assignments_collection.insert_one(assignment_data)
+            assignment_data["_id"] = str(result.inserted_id)
+        except Exception as e:
+            print(f"Error inserting assignment to MongoDB: {e}")
+            import uuid
+            assignment_data["_id"] = str(uuid.uuid4())
+            _in_memory_assignments.append(assignment_data)
+    else:
+        import uuid
+        assignment_data["_id"] = str(uuid.uuid4())
+        _in_memory_assignments.append(assignment_data)
+    return IssueAssignment(**assignment_data)
+
+async def get_assignments_by_worker(worker_email: str) -> List[IssueAssignment]:
+    """Get all assignments for a worker"""
+    if assignments_collection is not None:
+        try:
+            cursor = assignments_collection.find({"assigned_to": worker_email})
+            assignments = []
+            async for assignment in cursor:
+                if "_id" in assignment:
+                    assignment["_id"] = str(assignment["_id"])
+                assignments.append(IssueAssignment(**assignment))
+            return assignments
+        except Exception as e:
+            print(f"Error querying assignments from MongoDB: {e}")
+    
+    return [IssueAssignment(**assignment) for assignment in _in_memory_assignments 
+            if assignment.get("assigned_to") == worker_email]
+
+async def get_assignment_by_ticket(ticket_id: str) -> Optional[IssueAssignment]:
+    """Get assignment by ticket ID"""
+    if assignments_collection is not None:
+        try:
+            assignment_data = await assignments_collection.find_one({"ticket_id": ticket_id})
+            if assignment_data:
+                if "_id" in assignment_data:
+                    assignment_data["_id"] = str(assignment_data["_id"])
+                return IssueAssignment(**assignment_data)
+        except Exception as e:
+            print(f"Error querying assignment from MongoDB: {e}")
+    
+    for assignment in _in_memory_assignments:
+        if assignment.get("ticket_id") == ticket_id:
+            return IssueAssignment(**assignment)
+    return None
+
+async def update_assignment_status(ticket_id: str, status: str, notes: Optional[str] = None) -> Optional[IssueAssignment]:
+    """Update assignment status"""
+    if assignments_collection is not None:
+        try:
+            update_data = {"status": status}
+            if notes:
+                update_data["notes"] = notes
+            if status == "completed":
+                update_data["completed_at"] = datetime.now().strftime("%H:%M %d-%m-%Y")
+            
+            result = await assignments_collection.find_one_and_update(
+                {"ticket_id": ticket_id},
+                {"$set": update_data},
+                return_document=True
+            )
+            if result:
+                if "_id" in result:
+                    result["_id"] = str(result["_id"])
+                return IssueAssignment(**result)
+        except Exception as e:
+            print(f"Error updating assignment in MongoDB: {e}")
+    
+    for assignment in _in_memory_assignments:
+        if assignment.get("ticket_id") == ticket_id:
+            assignment["status"] = status
+            if notes:
+                assignment["notes"] = notes
+            if status == "completed":
+                assignment["completed_at"] = datetime.now().strftime("%H:%M %d-%m-%Y")
+            return IssueAssignment(**assignment)
+    return None
+
+# User management functions
+async def create_user(user_data: dict) -> dict:
+    """Create a new user"""
+    if users_collection is not None:
+        try:
+            result = await users_collection.insert_one(user_data)
+            user_data["_id"] = str(result.inserted_id)
+        except Exception as e:
+            print(f"Error inserting user to MongoDB: {e}")
+            import uuid
+            user_data["_id"] = str(uuid.uuid4())
+            _in_memory_users.append(user_data)
+    else:
+        import uuid
+        user_data["_id"] = str(uuid.uuid4())
+        _in_memory_users.append(user_data)
+    return user_data
+
+async def get_user_by_email(email: str) -> Optional[dict]:
+    """Get user by email"""
+    if users_collection is not None:
+        try:
+            user_data = await users_collection.find_one({"email": email})
+            if user_data:
+                if "_id" in user_data:
+                    user_data["_id"] = str(user_data["_id"])
+                return user_data
+        except Exception as e:
+            print(f"Error querying user from MongoDB: {e}")
+    
+    for user in _in_memory_users:
+        if user.get("email") == email:
+            return user
+    return None
+
+async def update_user_status(email: str, is_active: bool) -> Optional[dict]:
+    """Update user active status"""
+    if users_collection is not None:
+        try:
+            result = await users_collection.find_one_and_update(
+                {"email": email},
+                {"$set": {"is_active": is_active}},
+                return_document=True
+            )
+            if result:
+                if "_id" in result:
+                    result["_id"] = str(result["_id"])
+                return result
+        except Exception as e:
+            print(f"Error updating user in MongoDB: {e}")
+    
+    for user in _in_memory_users:
+        if user.get("email") == email:
+            user["is_active"] = is_active
+            return user
     return None
