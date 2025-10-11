@@ -135,7 +135,6 @@ async def is_similar_issue(new_text: str, new_location: Optional[dict], new_cate
     
     return False
 
-
 # In-memory storage for development when MongoDB is not available
 _in_memory_issues = []
 _in_memory_departments = []
@@ -237,6 +236,24 @@ async def update_existing_issue(issue_id: str, new_email: str) -> IssueDB:
             return IssueDB(**issue)
     return None
 
+async def get_all_issues() -> list[IssueDB]:
+    """Get all issues from database"""
+    if issues_collection is not None:
+        try:
+            cursor = issues_collection.find()
+            issues = []
+            async for issue in cursor:
+                # Convert ObjectId to string
+                if "_id" in issue:
+                    issue["_id"] = str(issue["_id"])
+                issues.append(IssueDB(**issue))
+            return issues
+        except Exception as e:
+            print(f"Error querying MongoDB: {e}")
+    
+    # Use in-memory storage
+    return [IssueDB(**issue) for issue in _in_memory_issues]
+
 async def update_issue_status_in_db(ticket_id: str, new_status: str, updated_by_email: str) -> Optional[dict]:
     """Update issue status by ticket ID"""
     print(f"Database: Updating status for ticket {ticket_id} to {new_status} by {updated_by_email}")
@@ -336,24 +353,6 @@ async def get_issues_by_user_email(user_email: str) -> list[IssueDB]:
         if "users" in issue and user_email in issue["users"]:
             user_issues.append(IssueDB(**issue))
     return user_issues
-
-async def get_all_issues() -> list[IssueDB]:
-    """Get all issues from database"""
-    if issues_collection is not None:
-        try:
-            cursor = issues_collection.find()
-            issues = []
-            async for issue in cursor:
-                # Convert ObjectId to string
-                if "_id" in issue:
-                    issue["_id"] = str(issue["_id"])
-                issues.append(IssueDB(**issue))
-            return issues
-        except Exception as e:
-            print(f"Error querying MongoDB: {e}")
-    
-    # Use in-memory storage
-    return [IssueDB(**issue) for issue in _in_memory_issues]
 
 async def mark_issue_completion(ticket_id: str, completion_type: str, completed_by_email: str) -> Optional[dict]:
     """Mark issue completion by admin or user"""
@@ -639,6 +638,70 @@ async def get_assignment_by_ticket(ticket_id: str) -> Optional[IssueAssignment]:
         if assignment.get("ticket_id") == ticket_id:
             return IssueAssignment(**assignment)
     return None
+
+async def get_all_assignments() -> List[IssueAssignment]:
+    """Get all assignments from the database"""
+    if assignments_collection is not None:
+        try:
+            cursor = assignments_collection.find()
+            assignments = []
+            async for assignment in cursor:
+                if "_id" in assignment:
+                    assignment["_id"] = str(assignment["_id"])
+                assignments.append(IssueAssignment(**assignment))
+            return assignments
+        except Exception as e:
+            print(f"Error querying all assignments from MongoDB: {e}")
+    
+    return [IssueAssignment(**assignment) for assignment in _in_memory_assignments]
+
+async def reassign_issue_assignment(assignment_id: str, new_worker_email: str) -> Optional[IssueAssignment]:
+    """Reassign an issue to a different worker"""
+    if assignments_collection is not None:
+        try:
+            from bson import ObjectId
+            result = await assignments_collection.find_one_and_update(
+                {"_id": ObjectId(assignment_id)},
+                {
+                    "$set": {
+                        "assigned_to": new_worker_email,
+                        "updated_at": datetime.now().strftime("%H:%M %d-%m-%Y")
+                    }
+                },
+                return_document=True
+            )
+            if result:
+                if "_id" in result:
+                    result["_id"] = str(result["_id"])
+                return IssueAssignment(**result)
+        except Exception as e:
+            print(f"Error reassigning in MongoDB: {e}")
+    
+    for assignment in _in_memory_assignments:
+        if assignment.get("_id") == assignment_id:
+            assignment["assigned_to"] = new_worker_email
+            assignment["updated_at"] = datetime.now().strftime("%H:%M %d-%m-%Y")
+            return IssueAssignment(**assignment)
+    return None
+
+async def get_worker_workload(worker_email: str) -> int:
+    """Get current workload count for a worker"""
+    if assignments_collection is not None:
+        try:
+            count = await assignments_collection.count_documents({
+                "assigned_to": worker_email,
+                "status": {"$in": ["assigned", "in_progress"]}
+            })
+            return count
+        except Exception as e:
+            print(f"Error counting worker assignments in MongoDB: {e}")
+    
+    count = 0
+    for assignment in _in_memory_assignments:
+        if (assignment.get("assigned_to") == worker_email and 
+            assignment.get("status") in ["assigned", "in_progress"]):
+            count += 1
+    return count
 
 async def update_assignment_status(ticket_id: str, status: str, notes: Optional[str] = None) -> Optional[IssueAssignment]:
     """Update assignment status"""
