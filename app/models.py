@@ -3,7 +3,7 @@ from typing import Optional, List
 from datetime import datetime
 from bson import ObjectId
 from enum import Enum
-
+from pydantic import ConfigDict
 
 class Location(BaseModel):
     longitude: float
@@ -13,17 +13,17 @@ class IssueRequest(BaseModel):
     text: str = Field(..., description="Text content describing the issue")
     email: EmailStr = Field(..., description="User's email address")
     name: str = Field(..., description="User's name")
-    location: Optional[Location] = Field(None, description="Location coordinates (longitude, latitude)")
-    photo: Optional[str] = Field(None, description="Base64 encoded photo string")
+    location: Optional[Location] = None
+    photo: Optional[str] = None
 
 class IssueResponse(BaseModel):
     ticket_id: str
     category: str
     address: str
-    location: Optional[Location]
+    location: Optional[Location] = None
     description: str
     title: str
-    photo: Optional[str]
+    photo: Optional[str] = None
     status: str
     created_at: str
     users: List[str]
@@ -31,53 +31,52 @@ class IssueResponse(BaseModel):
     original_text: Optional[str] = None
     in_progress_at: Optional[str] = None
     completed_at: Optional[str] = None
-    updated_by_email: Optional[str] = None  # Email of who last updated the status
-    updated_at: Optional[str] = None  # When the status was last updated
-    admin_completed_at: Optional[str] = None  # When admin marked as completed
-    user_completed_at: Optional[str] = None  # When user marked as completed
-    admin_completed_by: Optional[str] = None  # Email of admin who marked completed
-    user_completed_by: Optional[str] = None  # Email of user who marked completed
+    updated_by_email: Optional[str] = None
+    updated_at: Optional[str] = None
+    admin_completed_at: Optional[str] = None
+    user_completed_at: Optional[str] = None
+    admin_completed_by: Optional[str] = None
+    user_completed_by: Optional[str] = None
 
 class IssueDB(BaseModel):
     id: Optional[str] = Field(None, alias="_id")
     ticket_id: str
     category: str
     address: str
-    location: Optional[Location]
+    location: Optional[Location] = None
     description: str
     title: str
-    photo: Optional[str]
+    photo: Optional[str] = None
     status: str
     created_at: str
     users: List[str]
     issue_count: int
-    content_hash: str  # For duplicate detection
-    original_text: str  # Store original user input for similarity comparison
-    in_progress_at: Optional[str] = None  # When status was changed to in_progress
-    completed_at: Optional[str] = None    # When status was changed to completed
-    updated_by_email: Optional[str] = None  # Email of who last updated the status
-    updated_at: Optional[str] = None  # When the status was last updated
-    admin_completed_at: Optional[str] = None  # When admin marked as completed
-    user_completed_at: Optional[str] = None  # When user marked as completed
-    admin_completed_by: Optional[str] = None  # Email of admin who marked completed
-    user_completed_by: Optional[str] = None  # Email of user who marked completed
+    content_hash: str
+    original_text: str
+    in_progress_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    updated_by_email: Optional[str] = None
+    updated_at: Optional[str] = None
+    admin_completed_at: Optional[str] = None
+    user_completed_at: Optional[str] = None
+    admin_completed_by: Optional[str] = None
+    user_completed_by: Optional[str] = None
 
-    class Config:
-        allow_population_by_field_name = True
-        json_encoders = {
-            ObjectId: str
-        }
+    model_config = ConfigDict(
+        populate_by_name=True,
+        json_encoders={ObjectId: str}
+    )
 
 class StatusUpdateRequest(BaseModel):
-    status: str = Field(..., description="New status for the issue")
-    email: EmailStr = Field(..., description="Email of the user updating the status")
+    status: str
+    email: EmailStr
 
 class UserEmailRequest(BaseModel):
-    email: EmailStr = Field(..., description="User's email address to get their issues")
+    email: EmailStr
 
 class CompletionRequest(BaseModel):
-    email: EmailStr = Field(..., description="Email of the user/admin marking completion")
-    completion_type: str = Field(..., description="Type of completion: 'admin' or 'user'")
+    email: EmailStr
+    completion_type: str
 
 class CompletionResponse(BaseModel):
     message: str
@@ -88,6 +87,24 @@ class CompletionResponse(BaseModel):
     current_status: str
     is_fully_completed: bool
 
+class UserRole(str, Enum):
+    AUTHORITY = "authority"
+    WORKER = "worker"
+    CITIZEN = "citizen"
+
+class Department(BaseModel):
+    id: Optional[str] = Field(None, alias="_id")
+    name: str
+    description: Optional[str] = None
+    categories: List[str] = []
+    is_active: bool = True
+    created_at: str = Field(default_factory=lambda: datetime.now().strftime("%H:%M %d-%m-%Y"))
+
+    model_config = ConfigDict(
+        populate_by_name=True,
+        json_encoders={ObjectId: str}
+    )
+    
 # Role-based system models
 class UserRole(str, Enum):
     AUTHORITY = "authority"
@@ -98,8 +115,9 @@ class Department(BaseModel):
     id: Optional[str] = Field(None, alias="_id")
     name: str = Field(..., description="Department name")
     description: Optional[str] = Field(None, description="Department description")
-    created_at: str = Field(default_factory=lambda: datetime.now().strftime("%H:%M %d-%m-%Y"))
+    categories: List[str] = Field(default_factory=list, description="Issue categories handled by this department")
     is_active: bool = Field(default=True, description="Whether department is active")
+    created_at: str = Field(default_factory=lambda: datetime.now().strftime("%H:%M %d-%m-%Y"))
 
     class Config:
         allow_population_by_field_name = True
@@ -119,6 +137,11 @@ class WorkerProfile(BaseModel):
     skills: List[str] = Field(default_factory=list, description="Worker's skills/specializations")
     profile_photo: Optional[str] = Field(None, description="Base64 encoded profile photo")
     is_active: bool = Field(default=True, description="Whether worker is active")
+    current_workload: int = Field(default=0, description="Current number of assigned tasks")
+    max_capacity: int = Field(default=5, description="Maximum tasks this worker can handle")
+    is_available: bool = Field(default=True, description="Whether worker is available for new assignments")
+    specialization: Optional[str] = Field(None, description="Worker's primary specialization")
+    experience_years: int = Field(default=0, description="Years of experience")
     created_at: str = Field(default_factory=lambda: datetime.now().strftime("%H:%M %d-%m-%Y"))
     updated_at: Optional[str] = Field(None, description="Last update timestamp")
 
@@ -161,24 +184,25 @@ class UserResponse(BaseModel):
 
 class IssueAssignment(BaseModel):
     id: Optional[str] = Field(None, alias="_id")
-    ticket_id: str = Field(..., description="Issue ticket ID")
-    assigned_to: str = Field(..., description="Worker email assigned to the issue")
-    assigned_by: str = Field(..., description="Authority email who assigned the issue")
+    ticket_id: str
+    assigned_to: str
+    assigned_by: str
     assigned_at: str = Field(default_factory=lambda: datetime.now().strftime("%H:%M %d-%m-%Y"))
-    status: str = Field(default="assigned", description="Assignment status")
-    notes: Optional[str] = Field(None, description="Assignment notes")
-    completed_at: Optional[str] = Field(None, description="When assignment was completed")
+    status: str = "assigned"
+    notes: Optional[str] = None
+    completed_at: Optional[str] = None
 
-    class Config:
-        allow_population_by_field_name = True
-        json_encoders = {
-            ObjectId: str
-        }
+    model_config = ConfigDict(
+        populate_by_name=True,
+        json_encoders={ObjectId: str}
+    )
+
 
 class AssignmentRequest(BaseModel):
-    ticket_id: str = Field(..., description="Issue ticket ID to assign")
-    assigned_to: EmailStr = Field(..., description="Worker email to assign to")
-    notes: Optional[str] = Field(None, description="Assignment notes")
+    ticket_id: str
+    assigned_to: EmailStr
+    notes: Optional[str] = None
+    assigned_by: EmailStr
 
 class AssignmentResponse(BaseModel):
     message: str
@@ -188,3 +212,16 @@ class AssignmentResponse(BaseModel):
     assigned_by: str
     assigned_at: str
     status: str
+    
+class CompletionRequest(BaseModel):
+    email: EmailStr = Field(..., description="Email of the user/admin marking completion")
+    completion_type: str = Field(..., description="Type of completion: 'admin' or 'user'")
+
+class CompletionResponse(BaseModel):
+    message: str
+    ticket_id: str
+    completion_type: str
+    completed_by: str
+    completed_at: str
+    current_status: str
+    is_fully_completed: bool
