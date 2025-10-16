@@ -204,4 +204,4 @@ cython_debug/
 # Marimo
 marimo/_static/
 marimo/_lsp/
-_marimo_/
+_marimo_/.env
