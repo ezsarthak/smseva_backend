@@ -664,47 +664,70 @@ async def get_worker_by_email_endpoint(email: str):
 
 # Issue assignment endpoints
 @app.post("/assignments", response_model=AssignmentResponse)
-async def create_assignment_endpoint(assignment_request: AssignmentRequest):
+async def create_assignment_endpoint(assignment_request: AssignmentRequest, assigned_by_email: str = "admin@example.com"):
     """Create a new assignment"""
     try:
-        issue = next((i for i in await get_all_issues() if i.ticket_id == assignment_request.ticket_id), None)
+        # Verify issue exists
+        issues = await get_all_issues()
+        issue = next((i for i in issues if i.ticket_id == assignment_request.ticket_id), None)
         if not issue:
             raise HTTPException(status_code=404, detail="Issue not found")
         
+        # Verify worker exists
         worker = await get_worker_by_email(assignment_request.assigned_to)
         if not worker:
             raise HTTPException(status_code=404, detail="Worker not found")
         
+        # Check for existing assignment
         existing_assignment = await get_assignment_by_ticket(assignment_request.ticket_id)
         if existing_assignment:
             raise HTTPException(status_code=400, detail="Issue is already assigned")
         
+        # Create assignment data
         assignment_data = {
             "ticket_id": assignment_request.ticket_id,
             "assigned_to": assignment_request.assigned_to,
-            "assigned_by": assignment_request.assigned_by,
+            "assigned_by": assigned_by_email,
             "assigned_at": datetime.now().strftime("%H:%M %d-%m-%Y"),
             "status": "assigned",
             "notes": assignment_request.notes or ""
         }
         
+        # Create the assignment
         assignment = await create_issue_assignment(assignment_data)
-        await update_issue_status_in_db(assignment_request.ticket_id, "in_progress", assignment_request.assigned_by)
         
-        # This returns a database model, we need to convert to the response model
+        # Update issue status to in_progress
+        await update_issue_status_in_db(assignment_request.ticket_id, "in_progress", assigned_by_email)
+        
+        # 🔥 FIX: Send assignment notification email
+        email_sent = await email_service.send_assignment_notification(
+            assignment_request.ticket_id,
+            assignment_request.assigned_to,
+            assigned_by_email,
+            assignment_request.notes
+        )
+        
+        if email_sent:
+            print(f"✅ Assignment notification sent to {assignment_request.assigned_to}")
+        else:
+            print(f"⚠️ Failed to send assignment notification to {assignment_request.assigned_to}")
+        
         return AssignmentResponse(
             message="Issue assigned successfully",
-            assignment_id=str(assignment.id),
+            assignment_id=str(assignment.id) if hasattr(assignment, 'id') else str(assignment._id),
             ticket_id=assignment.ticket_id,
             assigned_to=assignment.assigned_to,
             assigned_by=assignment.assigned_by,
             assigned_at=assignment.assigned_at,
             status=assignment.status
         )
+        
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error assigning issue: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error creating assignment: {str(e)}")
+
+
 
 @app.get("/assignments/worker/{worker_email}", response_model=List[IssueAssignment])
 async def get_worker_assignments_endpoint(worker_email: str):
@@ -1088,11 +1111,110 @@ async def get_issue_categories():
     return list(categories)
 
 @app.put("/issues/{ticket_id}/status")
-async def update_issue_status_endpoint(ticket_id: str, status_update: StatusUpdateRequest):
-    updated_issue = await update_issue_status_in_db(ticket_id, status_update.status, status_update.email)
-    if not updated_issue:
-        raise HTTPException(status_code=404, detail="Issue not found")
-    return {"message": "Status updated successfully"}
+async def update_issue_status(ticket_id: str, status_update: StatusUpdateRequest):
+    """Update the status of an existing issue by ticket ID"""
+    try:
+        print(f"📧 Status update request - Ticket: {ticket_id}, New Status: {status_update.status}")
+        
+        # Validate status value
+        valid_statuses = ["new", "in_progress", "in progress", "admin_completed"]
+        
+        # Normalize the status
+        normalized_status = status_update.status
+        if status_update.status == "in progress":
+            normalized_status = "in_progress"
+        
+        if status_update.status not in valid_statuses:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Invalid status. Must be one of: {', '.join(valid_statuses)}"
+            )
+        
+        # Get the issue first to capture old status
+        all_issues = await get_all_issues()
+        current_issue = next((i for i in all_issues if i.ticket_id == ticket_id), None)
+        
+        if not current_issue:
+            raise HTTPException(status_code=404, detail=f"Issue with ticket ID {ticket_id} not found")
+        
+        old_status = current_issue.status
+        
+        # Update the issue
+        updated_issue = await update_issue_status_in_db(ticket_id, normalized_status, status_update.email)
+        
+        if not updated_issue:
+            raise HTTPException(status_code=404, detail=f"Issue with ticket ID {ticket_id} not found")
+        
+        # 🔥 FIX: Send status update notifications to ALL users who reported this issue
+        if updated_issue.get("users") and len(updated_issue.get("users", [])) > 0:
+            print(f"📧 Sending status update emails to {len(updated_issue['users'])} users")
+            
+            email_sent = await email_service.send_status_update_notification(
+                ticket_id,
+                old_status,  # Use the captured old status
+                normalized_status,
+                updated_issue["users"]
+            )
+            
+            if email_sent:
+                print(f"✅ Status update notifications sent successfully")
+            else:
+                print(f"⚠️ Some status update notifications failed")
+        else:
+            print(f"⚠️ No users found for ticket {ticket_id}, skipping email notification")
+        
+        return {
+            "message": "Issue status updated successfully",
+            "ticket_id": ticket_id,
+            "old_status": old_status,
+            "new_status": normalized_status,
+            "updated_by_email": status_update.email,
+            "updated_at": datetime.now().strftime("%H:%M %d-%m-%Y"),
+            "notification_sent": len(updated_issue.get("users", [])) > 0
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error in update_issue_status: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error updating issue status: {str(e)}")
+
+@app.get("/test-email/{email}")
+async def test_email_service(email: str):
+    """Test endpoint to check if email service is working"""
+    try:
+        # Test ticket confirmation
+        from .models import IssueResponse
+        
+        test_issue = IssueResponse(
+            ticket_id="TEST-123",
+            category="Water & Drainage",
+            address="Test Address, Test City",
+            location=None,
+            description="This is a test issue",
+            title="Test Issue",
+            photo=None,
+            status="new",
+            created_at=datetime.now().strftime("%H:%M %d-%m-%Y"),
+            users=[email],
+            issue_count=1,
+            original_text="Test text"
+        )
+        
+        result = await email_service.send_ticket_confirmation(test_issue, email, "Test User")
+        
+        return {
+            "email_service_configured": email_service.is_configured,
+            "test_email_sent": result,
+            "recipient": email,
+            "sendgrid_api_key_present": bool(email_service.sendgrid_api_key),
+            "from_email": email_service.from_email
+        }
+    except Exception as e:
+        return {
+            "error": str(e),
+            "email_service_configured": email_service.is_configured
+        }
 
 
 # --- Worker and Auth Routes ---

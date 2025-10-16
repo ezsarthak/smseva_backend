@@ -29,49 +29,49 @@ class EmailService:
     def _create_ticket_confirmation_html(self, issue: IssueResponse, user_name: str) -> str:
         """Create HTML content for ticket confirmation email"""
         return f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Ticket Confirmation</title>
-            <style>
-                body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
-                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
-                .header {{ background: #007bff; color: white; padding: 20px; text-align: center; border-radius: 8px 8px 0 0; }}
-                .content {{ background: #f8f9fa; padding: 20px; border-radius: 0 0 8px 8px; }}
-                .ticket-details {{ background: white; padding: 20px; margin: 20px 0; border-radius: 8px; border-left: 4px solid #007bff; }}
-                .status-new {{ color: #007bff; font-weight: bold; }}
-                .footer {{ text-align: center; margin-top: 30px; color: #666; font-size: 12px; }}
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="header">
-                    <h1>🎫 Ticket Created Successfully!</h1>
-                </div>
-                <div class="content">
-                    <p>Dear <strong>{user_name}</strong>,</p>
-                    <p>Your municipal issue has been registered successfully. Here are the details:</p>
-                    <div class="ticket-details">
-                        <h3>📋 Ticket Details</h3>
-                        <p><strong>Ticket ID:</strong> <code>{issue.ticket_id}</code></p>
-                        <p><strong>Title:</strong> {issue.title}</p>
-                        <p><strong>Category:</strong> {issue.category}</p>
-                        <p><strong>Address:</strong> {issue.address}</p>
-                        <p><strong>Description:</strong> {issue.description}</p>
-                        <p><strong>Status:</strong> <span class="status-new">{issue.status}</span></p>
-                        <p><strong>Created:</strong> {issue.created_at}</p>
-                        <p><strong>Report Count:</strong> {issue.issue_count}</p>
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Ticket Confirmation</title>
+                <style>
+                    body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+                    .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+                    .header {{ background: #007bff; color: white; padding: 20px; text-align: center; border-radius: 8px 8px 0 0; }}
+                    .content {{ background: #f8f9fa; padding: 20px; border-radius: 0 0 8px 8px; }}
+                    .ticket-details {{ background: white; padding: 20px; margin: 20px 0; border-radius: 8px; border-left: 4px solid #007bff; }}
+                    .status-new {{ color: #007bff; font-weight: bold; }}
+                    .footer {{ text-align: center; margin-top: 30px; color: #666; font-size: 12px; }}
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="header">
+                        <h1>🎫 Ticket Created Successfully!</h1>
                     </div>
-                    <p>We will keep you updated on the progress. You can track your ticket using the Ticket ID above.</p>
-                    <p>Thank you for helping improve our city!</p>
+                    <div class="content">
+                        <p>Dear <strong>{user_name}</strong>,</p>
+                        <p>Your municipal issue has been registered successfully. Here are the details:</p>
+                        <div class="ticket-details">
+                            <h3>📋 Ticket Details</h3>
+                            <p><strong>Ticket ID:</strong> <code>{issue.ticket_id}</code></p>
+                            <p><strong>Title:</strong> {issue.title}</p>
+                            <p><strong>Category:</strong> {issue.category}</p>
+                            <p><strong>Address:</strong> {issue.address}</p>
+                            <p><strong>Description:</strong> {issue.description}</p>
+                            <p><strong>Status:</strong> <span class="status-new">{issue.status}</span></p>
+                            <p><strong>Created:</strong> {issue.created_at}</p>
+                            <p><strong>Report Count:</strong> {issue.issue_count}</p>
+                        </div>
+                        <p>We will keep you updated on the progress. You can track your ticket using the Ticket ID above.</p>
+                        <p>Thank you for helping improve our city!</p>
+                    </div>
+                    <div class="footer">
+                        <hr>
+                        <p>This is an automated message from the Municipal Voice Assistant System.</p>
+                    </div>
                 </div>
-                <div class="footer">
-                    <hr>
-                    <p>This is an automated message from the Municipal Voice Assistant System.</p>
-                </div>
-            </div>
-        </body>
-        </html>
+            </body>
+            </html>
         """
 
     def _create_status_update_html(self, ticket_id: str, old_status: str, new_status: str) -> str:
