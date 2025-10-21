@@ -1,8 +1,20 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 import uuid
+import re
 from datetime import datetime
-from typing import List
+from typing import List, Set
+import logging
+from collections import deque
+import time
+
+logger = logging.getLogger(__name__)
+
+# Message deduplication cache - stores recently processed message IDs
+# Using deque for automatic size limiting and efficient operations
+_processed_message_cache: deque = deque(maxlen=1000)  # Keep last 1000 message IDs
+_processed_message_timestamps: dict = {}  # Track when messages were processed
 
 from .models import (
     IssueRequest, IssueResponse, IssueDB, StatusUpdateRequest, UserEmailRequest, 
@@ -11,13 +23,14 @@ from .models import (
     UserRole
 )
 from .database import (
-    create_content_hash, 
-    find_existing_issue, 
-    create_new_issue, 
+    create_content_hash,
+    find_existing_issue,
+    create_new_issue,
     update_existing_issue,
     get_all_issues,
     update_issue_status_in_db,
     get_issues_by_user_email,
+    get_issue_by_ticket_id,
     mark_issue_completion,
     issues_collection,
     _in_memory_issues,
@@ -32,8 +45,8 @@ from .database import (
     update_assignment_status
 )
 from .gemini_service import analyze_text
-from .email_service import email_service
 from .auth_service import auth_service
+from .telerivet_service import telerivet_service
 
 app = FastAPI(
     title="Municipal Voice Assistant API",
@@ -87,13 +100,6 @@ async def submit_issue(issue_request: IssueRequest):
             updated_issue = await update_existing_issue(
                 existing_issue.id, 
                 issue_request.email
-            )
-            
-            # Send email notification for duplicate issue
-            await email_service.send_ticket_confirmation(
-                updated_issue, 
-                issue_request.email, 
-                issue_request.name
             )
             
             return IssueResponse(
@@ -155,14 +161,7 @@ async def submit_issue(issue_request: IssueRequest):
         
         # Save to database
         created_issue = await create_new_issue(new_issue_data)
-        
-        # Send email notification for new issue
-        await email_service.send_ticket_confirmation(
-            created_issue, 
-            issue_request.email, 
-            issue_request.name
-        )
-        
+
         return IssueResponse(
             ticket_id=created_issue.ticket_id,
             category=created_issue.category,
@@ -371,15 +370,46 @@ async def update_issue_status(ticket_id: str, status_update: StatusUpdateRequest
         if not updated_issue:
             raise HTTPException(status_code=404, detail=f"Issue with ticket ID {ticket_id} not found")
         
-        # Send status update notifications to all users
-        if updated_issue.get("users"):
-            await email_service.send_status_update_notification(
-                ticket_id,
-                updated_issue.get("previous_status", "unknown"),
-                normalized_status,
-                updated_issue.get("users", [])
-            )
-        
+        # Send SMS notifications to users when status changes to in_progress or completed
+        previous_status = updated_issue.get("previous_status", "unknown")
+        print(f"📊 Status Update: {previous_status} → {normalized_status}")
+
+        if normalized_status in ["in_progress", "completed", "admin_completed"]:
+            # Only send SMS if status actually changed
+            if previous_status != normalized_status:
+                print(f"📲 Status changed - sending SMS notifications to all reporters")
+                users_list = updated_issue.get("users", [])
+                print(f"   👥 Number of users to notify: {len(users_list)}")
+
+                if users_list:
+                    sms_sent_count = 0
+                    for user_identifier in users_list:
+                        # Check if user_identifier is a phone number (starts with + or contains only digits)
+                        if user_identifier.startswith("+") or (user_identifier.replace(" ", "").replace("-", "").isdigit() and len(user_identifier.replace(" ", "").replace("-", "")) >= 10):
+                            print(f"   📱 Sending SMS to: {user_identifier}")
+                            try:
+                                await telerivet_service.send_status_update_sms_bilingual(
+                                    user_identifier,
+                                    ticket_id,
+                                    previous_status,
+                                    normalized_status
+                                )
+                                sms_sent_count += 1
+                                print(f"   ✅ SMS sent successfully")
+                            except Exception as sms_error:
+                                print(f"   ⚠️ Error sending SMS to {user_identifier}: {sms_error}")
+                                logger.error(f"Error sending SMS notification: {sms_error}")
+                        else:
+                            print(f"   ℹ️  Skipping {user_identifier} (not a phone number)")
+
+                    print(f"✅ Status update SMS notifications completed - {sms_sent_count} SMS sent")
+                else:
+                    print(f"ℹ️  No users to notify")
+            else:
+                print(f"ℹ️  Status unchanged - skipping SMS notifications")
+        else:
+            print(f"ℹ️  Status '{normalized_status}' doesn't trigger SMS notifications")
+
         # Prepare response with timestamp information
         response_data = {
             "message": "Issue status updated successfully",
@@ -477,16 +507,7 @@ async def mark_issue_completion_endpoint(ticket_id: str, completion_request: Com
         admin_completed = updated_issue.get("admin_completed_at")
         user_completed = updated_issue.get("user_completed_at")
         is_fully_completed = bool(admin_completed and user_completed)
-        
-        # Send completion notifications
-        if updated_issue.get("users"):
-            await email_service.send_status_update_notification(
-                ticket_id,
-                "in_progress",  # Previous status
-                updated_issue.get("status", "unknown"),
-                updated_issue.get("users", [])
-            )
-        
+
         # Prepare response
         response_data = {
             "message": f"Issue marked as {completion_type} completed successfully",
@@ -695,23 +716,10 @@ async def create_assignment_endpoint(assignment_request: AssignmentRequest, assi
         
         # Create the assignment
         assignment = await create_issue_assignment(assignment_data)
-        
+
         # Update issue status to in_progress
         await update_issue_status_in_db(assignment_request.ticket_id, "in_progress", assigned_by_email)
-        
-        # 🔥 FIX: Send assignment notification email
-        email_sent = await email_service.send_assignment_notification(
-            assignment_request.ticket_id,
-            assignment_request.assigned_to,
-            assigned_by_email,
-            assignment_request.notes
-        )
-        
-        if email_sent:
-            print(f"✅ Assignment notification sent to {assignment_request.assigned_to}")
-        else:
-            print(f"⚠️ Failed to send assignment notification to {assignment_request.assigned_to}")
-        
+
         return AssignmentResponse(
             message="Issue assigned successfully",
             assignment_id=str(assignment.id) if hasattr(assignment, 'id') else str(assignment._id),
@@ -880,14 +888,7 @@ async def create_assignment_endpoint(assignment_request: AssignmentRequest, assi
             })
         except Exception as e:
             print(f"Warning: Could not update worker workload: {e}")
-        
-        await email_service.send_assignment_notification(
-            assignment_request.ticket_id,
-            assignment_request.assigned_to,
-            assigned_by_email,
-            assignment_request.notes
-        )
-        
+
         return AssignmentResponse(
             message="Issue assigned successfully",
             assignment_id=assignment.id if hasattr(assignment, 'id') else str(assignment._id),
@@ -964,6 +965,498 @@ async def get_unassigned_issues():
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching unassigned issues: {str(e)}")
+
+
+# ============= TELERIVET SMS WEBHOOK =============
+
+@app.post("/telerivet/webhook")
+async def telerivet_webhook(request: Request):
+    """
+    Telerivet webhook endpoint to receive incoming SMS messages
+
+    When a user sends an SMS to your Telerivet phone number, this endpoint:
+    1. Receives the SMS content from Telerivet
+    2. Processes it using Gemini AI to extract issue details
+    3. Creates a new issue in the database
+    4. Sends a confirmation SMS back to the user
+
+    Note: Configure this URL in your Telerivet dashboard under
+    Phones > Your Phone > Services > Webhook
+    """
+    try:
+        # Telerivet can send data as form data OR JSON
+        # Try to parse as form data first (most common)
+        content_type = request.headers.get('content-type', '')
+
+        if 'application/json' in content_type:
+            webhook_data = await request.json()
+        else:
+            # Parse form data
+            form_data = await request.form()
+            webhook_data = dict(form_data)
+
+        print("=" * 50)
+        print("📨 TELERIVET WEBHOOK RECEIVED")
+        print(f"Content-Type: {content_type}")
+        print(f"Data keys: {list(webhook_data.keys())}")
+        print(f"Full data: {webhook_data}")
+        print("=" * 50)
+        logger.info(f"Received Telerivet webhook: {webhook_data}")
+
+        # === CRITICAL FILTERING SECTION ===
+        # Use BLACKLIST approach: Only reject webhooks we KNOW are not incoming user messages
+        # Be LENIENT with missing/empty fields (they might be legitimate incoming messages)
+
+        # 1. BLACKLIST: Reject known outgoing/status event types
+        event_type = webhook_data.get('event', '').lower().strip()
+        print(f"🔍 Event type: '{event_type}'")
+
+        # List of events we DON'T want to process (outgoing messages, status updates, etc.)
+        BLACKLISTED_EVENTS = [
+            'send_status',      # When bot sends a message
+            'delivery_status',  # Delivery confirmation
+            'sent',            # Message sent event
+            'delivered',       # Message delivered event
+            'failed',          # Send failed event
+            'message_sent',    # Alternative sent event
+        ]
+
+        if event_type and event_type in BLACKLISTED_EVENTS:
+            print(f"⏭️  IGNORING: Event type '{event_type}' is blacklisted (outgoing/status event)")
+            logger.info(f"Ignored webhook - blacklisted event: {event_type}")
+            return {"status": "ignored", "reason": f"blacklisted_event: {event_type}"}
+
+        print(f"✅ Event type OK ('{event_type}' not in blacklist)")
+
+        # 2. BLACKLIST: Reject if direction is explicitly outgoing
+        message_direction = webhook_data.get('direction', '').lower().strip()
+        print(f"🔍 Message direction: '{message_direction}'")
+
+        if message_direction in ['outgoing', 'sent', 'sending']:
+            print(f"⏭️  IGNORING: Direction is '{message_direction}' (outgoing message)")
+            logger.info(f"Ignored webhook - outgoing direction: {message_direction}")
+            return {"status": "ignored", "reason": f"outgoing_direction: {message_direction}"}
+
+        print(f"✅ Direction OK ('{message_direction}' not outgoing)")
+
+        # 3. BLACKLIST: Reject if status indicates sent/sending (but allow empty/received)
+        message_status = webhook_data.get('status', '').lower().strip()
+        print(f"🔍 Message status: '{message_status}'")
+
+        BLACKLISTED_STATUSES = [
+            'sent',
+            'sending',
+            'queued',
+            'failed',
+            'delivered'
+        ]
+
+        if message_status and message_status in BLACKLISTED_STATUSES:
+            print(f"⏭️  IGNORING: Message status '{message_status}' indicates outgoing/failed message")
+            logger.info(f"Ignored webhook - blacklisted status: {message_status}")
+            return {"status": "ignored", "reason": f"blacklisted_status: {message_status}"}
+
+        print(f"✅ Status OK ('{message_status}' not in blacklist)")
+
+        # Extract webhook secret for validation (if configured)
+        secret = webhook_data.get('secret', '')
+
+        # Skip validation if no data at all (for initial testing)
+        if not webhook_data:
+            logger.warning("Empty webhook data received")
+            return {"status": "error", "message": "Empty webhook data"}
+
+        # Process incoming SMS
+        sms_data = telerivet_service.process_incoming_sms(webhook_data)
+        from_phone = sms_data["phone"]
+        message_text = sms_data["text"]
+        message_id = sms_data["message_id"]
+
+        print(f"📋 Extracted data:")
+        print(f"  📱 Phone: {from_phone}")
+        print(f"  💬 Message: {message_text}")
+        print(f"  🆔 Message ID: {message_id}")
+
+        if not message_text:
+            print("❌ ERROR: Empty message text")
+            logger.warning("Empty message received")
+            return {"status": "error", "message": "Empty message"}
+
+        if not from_phone:
+            print("❌ ERROR: No phone number in webhook data")
+            logger.warning("No phone number in webhook data")
+            return {"status": "error", "message": "No phone number"}
+
+        # 4. MESSAGE DEDUPLICATION - Only if message_id exists
+        if message_id:
+            print(f"🔍 Checking deduplication for message ID: {message_id}")
+            if message_id in _processed_message_cache:
+                print(f"⏭️  IGNORING: Message ID '{message_id}' already processed")
+                # Check how recently it was processed
+                if message_id in _processed_message_timestamps:
+                    time_ago = time.time() - _processed_message_timestamps[message_id]
+                    print(f"   ⏱️  Originally processed {time_ago:.1f} seconds ago")
+                logger.info(f"Duplicate message ignored - ID: {message_id}")
+                return {"status": "ignored", "reason": "duplicate message ID"}
+
+            # Add to cache - this is a new message
+            _processed_message_cache.append(message_id)
+            _processed_message_timestamps[message_id] = time.time()
+            print(f"✅ Message ID '{message_id}' cached for deduplication")
+
+            # Clean old timestamps (keep only last 1000)
+            if len(_processed_message_timestamps) > 1000:
+                # Remove oldest entries
+                sorted_ids = sorted(_processed_message_timestamps.items(), key=lambda x: x[1])
+                for old_id, _ in sorted_ids[:-1000]:
+                    del _processed_message_timestamps[old_id]
+        else:
+            print(f"ℹ️  No message ID provided - deduplication skipped (will process)")
+
+        print(f"=" * 50)
+        print(f"✅ ALL FILTERS PASSED - Processing incoming message")
+        print(f"=" * 50)
+
+        # Check if message is a status query (format: "status:ticket_id" or "STATUS:TKT-...")
+        status_query_pattern = r'^status\s*:\s*(.+)$'
+        status_match = re.match(status_query_pattern, message_text.strip(), re.IGNORECASE)
+
+        if status_match:
+            # User is querying status of an issue
+            ticket_id = status_match.group(1).strip()
+            print(f"🔍 STATUS QUERY DETECTED")
+            print(f"   📋 Ticket ID: {ticket_id}")
+            print(f"   📱 From: {from_phone}")
+
+            # Look up the issue
+            issue = await get_issue_by_ticket_id(ticket_id)
+
+            if not issue:
+                # Send error message in bilingual format
+                error_message = (
+                    f"❌ Ticket not found / टिकट नहीं मिला\n\n"
+                    f"Ticket: {ticket_id}\n\n"
+                    f"Please check the ticket ID and try again.\n"
+                    f"कृपया टिकट आईडी जांचें और पुनः प्रयास करें।"
+                )
+                print(f"❌ Ticket {ticket_id} not found in database")
+                print(f"📤 Sending error SMS to {from_phone}")
+                telerivet_service.send_sms(from_phone, error_message)
+
+                return {
+                    "status": "error",
+                    "message": "Ticket not found",
+                    "ticket_id": ticket_id
+                }
+
+            # Send issue details
+            print(f"✅ Ticket found in database")
+            print(f"📤 Sending issue details SMS to {from_phone}")
+            issue_dict = issue.dict() if hasattr(issue, 'dict') else issue.__dict__
+
+            sms_sent = await telerivet_service.send_issue_details_sms(from_phone, issue_dict)
+            print(f"✅ STATUS QUERY COMPLETED - SMS sent: {sms_sent}")
+
+            return {
+                "status": "success",
+                "message": "Status query processed - issue details sent",
+                "ticket_id": ticket_id,
+                "sms_sent": sms_sent
+            }
+
+        print("=" * 50)
+        print("📝 NEW ISSUE CREATION FLOW")
+        print(f"   📱 From: {from_phone}")
+        print(f"   💬 Message: {message_text[:50]}...")
+        print("=" * 50)
+
+        # Extract issue information using Gemini
+        try:
+            print("🤖 Starting Gemini AI analysis...")
+            analysis_result = await analyze_text(message_text)
+            print(f"✅ Gemini AI analysis complete")
+            print(f"   📂 Category: {analysis_result.get('category')}")
+            print(f"   📌 Title: {analysis_result.get('title')}")
+            print(f"   📍 Address: {analysis_result.get('address')}")
+        except Exception as e:
+            print(f"❌ Gemini AI analysis failed: {e}")
+            logger.error(f"Gemini AI error: {e}")
+            return {"status": "error", "message": f"AI analysis failed: {str(e)}"}
+
+        # Create content hash for duplicate detection
+        content_hash = await create_content_hash(message_text, None)
+        print(f"✅ Content hash created: {content_hash[:16]}...")
+
+        # Check if issue already exists
+        print("🔍 Checking for duplicate issues...")
+        existing_issue = await find_existing_issue(
+            content_hash,
+            message_text,
+            None,
+            analysis_result["category"],
+            from_phone  # Use phone number as identifier
+        )
+
+        if existing_issue:
+            print(f"🔄 DUPLICATE DETECTED!")
+            print(f"   📋 Existing Ticket: {existing_issue.ticket_id}")
+            print(f"   👥 Current reporters: {existing_issue.issue_count}")
+            print(f"   📱 Adding {from_phone} to reporters list")
+
+            # Update existing issue with the new phone number
+            updated_issue = await update_existing_issue(existing_issue.id, from_phone)
+
+            # Send SMS confirmation with full details
+            print(f"📤 Sending duplicate confirmation SMS to {from_phone}...")
+            sms_sent = await telerivet_service.send_ticket_confirmation_sms(
+                phone=from_phone,
+                ticket_id=updated_issue.ticket_id,
+                category=updated_issue.category,
+                title=updated_issue.title,
+                address=updated_issue.address,
+                description=updated_issue.description
+            )
+            print(f"✅ DUPLICATE HANDLING COMPLETED - SMS sent: {sms_sent}")
+
+            return {
+                "status": "success",
+                "message": "Duplicate issue - added to reporters",
+                "ticket_id": updated_issue.ticket_id,
+                "issue_count": updated_issue.issue_count,
+                "sms_sent": sms_sent
+            }
+
+        print("✨ No duplicate found - Creating NEW issue...")
+
+        # Generate unique ticket ID
+        ticket_id = f"TKT-{datetime.now().strftime('%d%m%Y')}-{str(uuid.uuid4())[:8].upper()}"
+        current_datetime = datetime.now().strftime("%H:%M %d-%m-%Y")
+        print(f"   🎫 Generated ticket ID: {ticket_id}")
+
+        # Create new issue
+        new_issue_data = {
+            "ticket_id": ticket_id,
+            "category": analysis_result["category"],
+            "address": analysis_result["address"],
+            "location": None,
+            "description": analysis_result["description"],
+            "title": analysis_result["title"],
+            "photo": None,
+            "status": "new",
+            "created_at": current_datetime,
+            "users": [from_phone],  # Store phone number
+            "issue_count": 1,
+            "content_hash": content_hash,
+            "original_text": message_text,
+            "updated_by_email": from_phone,
+            "updated_at": current_datetime,
+            "in_progress_at": None,
+            "completed_at": None,
+            "admin_completed_at": None,
+            "user_completed_at": None,
+            "admin_completed_by": None,
+            "user_completed_by": None
+        }
+
+        # Save to database
+        print(f"💾 Saving new issue to database...")
+        created_issue = await create_new_issue(new_issue_data)
+        print(f"✅ Issue saved to database")
+        print(f"   🎫 Ticket ID: {created_issue.ticket_id}")
+        print(f"   📂 Category: {created_issue.category}")
+        print(f"   📍 Address: {created_issue.address}")
+
+        # Send SMS confirmation with full details
+        print(f"📤 Sending new issue confirmation SMS to {from_phone}...")
+        sms_sent = await telerivet_service.send_ticket_confirmation_sms(
+            phone=from_phone,
+            ticket_id=created_issue.ticket_id,
+            category=created_issue.category,
+            title=created_issue.title,
+            address=created_issue.address,
+            description=created_issue.description
+        )
+        print(f"✅ NEW ISSUE CREATION COMPLETED - SMS sent: {sms_sent}")
+        print("=" * 50)
+
+        logger.info(f"New issue created successfully: {ticket_id}")
+
+        return {
+            "status": "success",
+            "message": "New issue created",
+            "ticket_id": created_issue.ticket_id,
+            "category": created_issue.category,
+            "sms_sent": sms_sent
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error processing Telerivet webhook: {str(e)}")
+        return {
+            "status": "error",
+            "message": "Failed to process message"
+        }
+
+
+# ============= TELERIVET SMS DIAGNOSTICS =============
+
+@app.get("/telerivet/check_phone_status")
+async def check_telerivet_phone_status():
+    """
+    Check the status of the Telerivet phone and recent messages
+    Useful for debugging SMS delivery issues
+    """
+    try:
+        import requests
+
+        if not telerivet_service.is_configured:
+            return {
+                "error": "Telerivet not configured",
+                "configured": False
+            }
+
+        # Get phone status
+        phone_url = f"{telerivet_service.base_url}/projects/{telerivet_service.project_id}/phones/{telerivet_service.phone_id}"
+
+        phone_response = requests.get(
+            phone_url,
+            auth=(telerivet_service.api_key, ''),
+            timeout=10
+        )
+
+        phone_data = phone_response.json() if phone_response.status_code == 200 else {}
+
+        # Get recent messages
+        messages_url = f"{telerivet_service.base_url}/projects/{telerivet_service.project_id}/messages"
+
+        messages_response = requests.get(
+            messages_url,
+            auth=(telerivet_service.api_key, ''),
+            params={"limit": 10, "direction": "outgoing"},
+            timeout=10
+        )
+
+        messages_data = messages_response.json() if messages_response.status_code == 200 else {}
+
+        return {
+            "phone_status": {
+                "name": phone_data.get("name"),
+                "phone_number": phone_data.get("phone_number"),
+                "phone_type": phone_data.get("phone_type"),
+                "battery": phone_data.get("battery"),
+                "charging": phone_data.get("charging"),
+                "internet_type": phone_data.get("internet_type"),
+                "last_active_time": phone_data.get("last_active_time"),
+                "send_paused": phone_data.get("send_paused"),
+                "send_limit": phone_data.get("send_limit"),
+                "app_version": phone_data.get("app_version")
+            },
+            "recent_messages": [
+                {
+                    "id": msg.get("id"),
+                    "to_number": msg.get("to_number"),
+                    "status": msg.get("status"),
+                    "time_created": msg.get("time_created"),
+                    "time_sent": msg.get("time_sent"),
+                    "error_message": msg.get("error_message")
+                }
+                for msg in messages_data.get("data", [])[:5]
+            ],
+            "diagnostics": {
+                "queued_messages": sum(1 for msg in messages_data.get("data", []) if msg.get("status") == "queued"),
+                "failed_messages": sum(1 for msg in messages_data.get("data", []) if msg.get("status") == "failed"),
+                "sent_messages": sum(1 for msg in messages_data.get("data", []) if msg.get("status") == "sent"),
+                "delivered_messages": sum(1 for msg in messages_data.get("data", []) if msg.get("status") == "delivered")
+            }
+        }
+
+    except Exception as e:
+        logger.error(f"Error checking Telerivet status: {e}")
+        return {
+            "error": str(e),
+            "configured": telerivet_service.is_configured
+        }
+
+
+# ============= TELERIVET SMS DELIVERY STATUS WEBHOOK =============
+
+@app.post("/telerivet/delivery_status")
+async def telerivet_delivery_status_webhook(request: Request):
+    """
+    Telerivet delivery status webhook to track SMS delivery
+
+    This endpoint receives callbacks from Telerivet when:
+    - SMS is queued for sending
+    - SMS is sent successfully
+    - SMS fails to send
+    - SMS is delivered to recipient
+    - SMS delivery fails
+
+    Configure this URL in Telerivet dashboard under:
+    Phones > Your Phone > Services > Webhook for Message Events
+    """
+    try:
+        # Parse webhook data
+        content_type = request.headers.get('content-type', '')
+
+        if 'application/json' in content_type:
+            webhook_data = await request.json()
+        else:
+            form_data = await request.form()
+            webhook_data = dict(form_data)
+
+        print("=" * 50)
+        print("DELIVERY STATUS WEBHOOK:")
+        print(f"Webhook data: {webhook_data}")
+        print("=" * 50)
+
+        # Extract key delivery information
+        message_id = webhook_data.get('id', webhook_data.get('message_id', ''))
+        status = webhook_data.get('status', '')
+        to_number = webhook_data.get('to_number', '')
+        error_message = webhook_data.get('error_message', '')
+        error_code = webhook_data.get('error_code', '')
+
+        # Log the delivery status
+        log_message = f"""
+        SMS Delivery Status Update:
+        - Message ID: {message_id}
+        - To Number: {to_number}
+        - Status: {status}
+        - Error Code: {error_code}
+        - Error Message: {error_message}
+        """
+
+        if error_message or error_code:
+            logger.error(log_message)
+            print(f"❌ SMS DELIVERY FAILED: {error_message} (Code: {error_code})")
+        elif status == 'sent':
+            logger.info(log_message)
+            print(f"✅ SMS SENT: Message {message_id} to {to_number}")
+        elif status == 'delivered':
+            logger.info(log_message)
+            print(f"✅ SMS DELIVERED: Message {message_id} to {to_number}")
+        elif status == 'queued':
+            logger.info(log_message)
+            print(f"📤 SMS QUEUED: Message {message_id} to {to_number}")
+        else:
+            logger.info(log_message)
+            print(f"📊 SMS STATUS: {status} for message {message_id}")
+
+        return {
+            "status": "received",
+            "message_id": message_id,
+            "acknowledged": True
+        }
+
+    except Exception as e:
+        logger.error(f"Error processing delivery status webhook: {str(e)}")
+        print(f"❌ Error in delivery status webhook: {str(e)}")
+        return {
+            "status": "error",
+            "message": f"Failed to process delivery status: {str(e)}"
+        }
 
 
 # Initialize default departments on startup
@@ -1067,7 +1560,6 @@ async def submit_issue(issue_request: IssueRequest):
         
         if existing_issue:
             updated_issue = await update_existing_issue(existing_issue.id, issue_request.email)
-            await email_service.send_ticket_confirmation(updated_issue, issue_request.email, issue_request.name)
             return updated_issue
         
         ticket_id = f"TKT-{datetime.now().strftime('%d%m%Y')}-{str(uuid.uuid4())[:8].upper()}"
@@ -1084,7 +1576,6 @@ async def submit_issue(issue_request: IssueRequest):
         }
         
         created_issue = await create_new_issue(new_issue_data)
-        await email_service.send_ticket_confirmation(created_issue, issue_request.email, issue_request.name)
         return created_issue
         
     except Exception as e:
@@ -1145,24 +1636,6 @@ async def update_issue_status(ticket_id: str, status_update: StatusUpdateRequest
         if not updated_issue:
             raise HTTPException(status_code=404, detail=f"Issue with ticket ID {ticket_id} not found")
         
-        # 🔥 FIX: Send status update notifications to ALL users who reported this issue
-        if updated_issue.get("users") and len(updated_issue.get("users", [])) > 0:
-            print(f"📧 Sending status update emails to {len(updated_issue['users'])} users")
-            
-            email_sent = await email_service.send_status_update_notification(
-                ticket_id,
-                old_status,  # Use the captured old status
-                normalized_status,
-                updated_issue["users"]
-            )
-            
-            if email_sent:
-                print(f"✅ Status update notifications sent successfully")
-            else:
-                print(f"⚠️ Some status update notifications failed")
-        else:
-            print(f"⚠️ No users found for ticket {ticket_id}, skipping email notification")
-        
         return {
             "message": "Issue status updated successfully",
             "ticket_id": ticket_id,
@@ -1178,44 +1651,6 @@ async def update_issue_status(ticket_id: str, status_update: StatusUpdateRequest
     except Exception as e:
         print(f"❌ Error in update_issue_status: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error updating issue status: {str(e)}")
-
-@app.get("/test-email/{email}")
-async def test_email_service(email: str):
-    """Test endpoint to check if email service is working"""
-    try:
-        # Test ticket confirmation
-        from .models import IssueResponse
-        
-        test_issue = IssueResponse(
-            ticket_id="TEST-123",
-            category="Water & Drainage",
-            address="Test Address, Test City",
-            location=None,
-            description="This is a test issue",
-            title="Test Issue",
-            photo=None,
-            status="new",
-            created_at=datetime.now().strftime("%H:%M %d-%m-%Y"),
-            users=[email],
-            issue_count=1,
-            original_text="Test text"
-        )
-        
-        result = await email_service.send_ticket_confirmation(test_issue, email, "Test User")
-        
-        return {
-            "email_service_configured": email_service.is_configured,
-            "test_email_sent": result,
-            "recipient": email,
-            "sendgrid_api_key_present": bool(email_service.sendgrid_api_key),
-            "from_email": email_service.from_email
-        }
-    except Exception as e:
-        return {
-            "error": str(e),
-            "email_service_configured": email_service.is_configured
-        }
-
 
 # --- Worker and Auth Routes ---
 

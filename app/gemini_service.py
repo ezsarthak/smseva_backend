@@ -173,7 +173,7 @@ def extract_address(text: str, text_lower: str) -> str:
 
 def generate_title(category: str, original_text: str, text_lower: str, address: str) -> str:
     """Generate simple title based on category and content"""
-    
+
     if "गड्ढा" in original_text or "pothole" in text_lower:
         return f"Pothole in {address}"
     elif "garbage" in text_lower or "कचरा" in original_text:
@@ -188,3 +188,36 @@ def generate_title(category: str, original_text: str, text_lower: str, address: 
         return f"Drainage Issue in {address}"
     else:
         return f"{category} Issue in {address}"
+
+async def translate_to_hindi(text: str) -> str:
+    """
+    Translate English text to Hindi using Gemini AI
+
+    Args:
+        text: English text to translate
+
+    Returns:
+        Hindi translation
+    """
+    if model is None:
+        # Return original if translation not available
+        return text
+
+    try:
+        prompt = f"""Translate the following English text to Hindi.
+        Provide ONLY the Hindi translation, no additional text, no explanations, no formatting.
+
+        Text to translate: {text}"""
+
+        response = model.generate_content(prompt)
+        hindi_text = response.text.strip()
+
+        # Remove any quotes or extra formatting
+        hindi_text = hindi_text.strip('"').strip("'").strip()
+
+        return hindi_text
+
+    except Exception as e:
+        print(f"Error translating to Hindi: {e}")
+        # Return original text if translation fails
+        return text

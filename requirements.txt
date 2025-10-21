@@ -9,4 +9,3 @@ pymongo
 requests
 email-validator
 firebase-admin
-sendgrid

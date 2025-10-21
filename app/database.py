@@ -331,6 +331,39 @@ async def update_issue_status_in_db(ticket_id: str, new_status: str, updated_by_
     print(f"Database: No issue found in memory with ticket_id {ticket_id}")
     return None
 
+async def get_issue_by_ticket_id(ticket_id: str) -> Optional[IssueDB]:
+    """Get a single issue by ticket ID"""
+    print(f"Database: Getting issue by ticket_id {ticket_id}")
+
+    if issues_collection is not None:
+        try:
+            print("Database: Using MongoDB")
+            issue_data = await issues_collection.find_one({"ticket_id": ticket_id})
+
+            if issue_data:
+                # Convert ObjectId to string
+                if "_id" in issue_data:
+                    issue_data["id"] = str(issue_data["_id"])
+                    del issue_data["_id"]
+
+                print(f"Database: Found issue in MongoDB")
+                return IssueDB(**issue_data)
+            else:
+                print(f"Database: No issue found in MongoDB with ticket_id {ticket_id}")
+
+        except Exception as e:
+            print(f"Database: Error getting issue from MongoDB: {e}")
+
+    # Use in-memory storage
+    print("Database: Using in-memory storage")
+    for issue in _in_memory_issues:
+        if issue.get("ticket_id") == ticket_id:
+            print(f"Database: Found issue in memory")
+            return IssueDB(**issue)
+
+    print(f"Database: No issue found in memory with ticket_id {ticket_id}")
+    return None
+
 async def get_issues_by_user_email(user_email: str) -> list[IssueDB]:
     """Get all issues created by a specific user email"""
     if issues_collection is not None:
