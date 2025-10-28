@@ -278,14 +278,22 @@ async def update_issue_status_in_db(ticket_id: str, new_status: str, updated_by_
                 "updated_at": datetime.now().strftime("%H:%M %d-%m-%Y"),
                 "updated_by_email": updated_by_email
             }
-            
+
             # Track when status is changed to in_progress
             if new_status == "in_progress" and previous_status != "in_progress":
                 update_data["in_progress_at"] = datetime.now().strftime("%H:%M %d-%m-%Y")
-            
+                # Clear awaiting confirmation flag when work restarts
+                update_data["awaiting_user_confirmation"] = False
+
             # Track when status is changed to completed
             if new_status == "completed" and previous_status != "completed":
                 update_data["completed_at"] = datetime.now().strftime("%H:%M %d-%m-%Y")
+                # Clear awaiting confirmation flag when fully completed
+                update_data["awaiting_user_confirmation"] = False
+
+            # Set awaiting_user_confirmation flag when admin marks as completed
+            if new_status == "admin_completed" and previous_status != "admin_completed":
+                update_data["awaiting_user_confirmation"] = True
             
             # Update the status
             result = await issues_collection.find_one_and_update(
@@ -313,14 +321,22 @@ async def update_issue_status_in_db(ticket_id: str, new_status: str, updated_by_
             issue["status"] = new_status
             issue["updated_at"] = datetime.now().strftime("%H:%M %d-%m-%Y")
             issue["updated_by_email"] = updated_by_email
-            
+
             # Track when status is changed to in_progress
             if new_status == "in_progress" and previous_status != "in_progress":
                 issue["in_progress_at"] = datetime.now().strftime("%H:%M %d-%m-%Y")
-            
+                # Clear awaiting confirmation flag when work restarts
+                issue["awaiting_user_confirmation"] = False
+
             # Track when status is changed to completed
             if new_status == "completed" and previous_status != "completed":
                 issue["completed_at"] = datetime.now().strftime("%H:%M %d-%m-%Y")
+                # Clear awaiting confirmation flag when fully completed
+                issue["awaiting_user_confirmation"] = False
+
+            # Set awaiting_user_confirmation flag when admin marks as completed
+            if new_status == "admin_completed" and previous_status != "admin_completed":
+                issue["awaiting_user_confirmation"] = True
             
             print(f"Database: Successfully updated in memory")
             return {

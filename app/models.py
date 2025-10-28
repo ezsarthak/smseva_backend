@@ -37,6 +37,7 @@ class IssueResponse(BaseModel):
     user_completed_at: Optional[str] = None
     admin_completed_by: Optional[str] = None
     user_completed_by: Optional[str] = None
+    awaiting_user_confirmation: Optional[bool] = None
 
 class IssueDB(BaseModel):
     id: Optional[str] = Field(None, alias="_id")
@@ -61,6 +62,7 @@ class IssueDB(BaseModel):
     user_completed_at: Optional[str] = None
     admin_completed_by: Optional[str] = None
     user_completed_by: Optional[str] = None
+    awaiting_user_confirmation: Optional[bool] = None
 
     model_config = ConfigDict(
         populate_by_name=True,

@@ -1164,6 +1164,111 @@ async def telerivet_webhook(request: Request):
                 "sms_sent": sms_sent
             }
 
+        # Check if message is a Yes/No confirmation response
+        message_lower = message_text.strip().lower()
+        yes_responses = ["yes", "y", "हाँ", "ha", "haa", "han", "हा"]
+        no_responses = ["no", "n", "नहीं", "nahi", "nahin", "nhi", "नही"]
+
+        if message_lower in yes_responses or message_lower in no_responses:
+            print(f"🔍 CONFIRMATION RESPONSE DETECTED")
+            print(f"   📱 From: {from_phone}")
+            print(f"   ✓/✗ Response: {message_text}")
+
+            # Check if user has any issues awaiting confirmation
+            if issues_collection is not None:
+                pending_issue = await issues_collection.find_one({
+                    "users": from_phone,
+                    "awaiting_user_confirmation": True
+                }, sort=[("updated_at", -1)])  # Get most recent
+            else:
+                # In-memory storage
+                pending_issue = None
+                for issue in reversed(_in_memory_issues):
+                    if from_phone in issue.get("users", []) and issue.get("awaiting_user_confirmation", False):
+                        pending_issue = issue
+                        break
+
+            if not pending_issue:
+                # No pending confirmation found
+                print(f"❌ No pending confirmation found for {from_phone}")
+                error_message = (
+                    f"ℹ️ No pending confirmation / कोई लंबित पुष्टि नहीं\n\n"
+                    f"You don't have any issues awaiting confirmation.\n"
+                    f"आपके पास पुष्टि की प्रतीक्षा में कोई मुद्दा नहीं है।"
+                )
+                telerivet_service.send_sms(from_phone, error_message)
+                return {
+                    "status": "error",
+                    "message": "No pending confirmation for this user",
+                    "response": message_text
+                }
+
+            ticket_id = pending_issue["ticket_id"]
+            print(f"✅ Found pending confirmation for ticket: {ticket_id}")
+
+            # Determine new status based on response
+            if message_lower in yes_responses:
+                new_status = "completed"
+                print(f"✅ User confirmed completion - marking as COMPLETED")
+            else:
+                new_status = "in_progress"
+                print(f"❌ User rejected completion - marking as IN_PROGRESS")
+
+            # Update the status
+            update_data = {
+                "status": new_status,
+                "awaiting_user_confirmation": False,
+                "updated_at": datetime.now().strftime("%H:%M %d-%m-%Y")
+            }
+
+            if new_status == "completed":
+                update_data["completed_at"] = datetime.now().strftime("%H:%M %d-%m-%Y")
+
+            if issues_collection is not None:
+                await issues_collection.update_one(
+                    {"ticket_id": ticket_id},
+                    {"$set": update_data}
+                )
+            else:
+                # Update in-memory storage
+                for issue in _in_memory_issues:
+                    if issue.get("ticket_id") == ticket_id:
+                        issue.update(update_data)
+                        break
+
+            print(f"✅ Status updated to: {new_status}")
+
+            # Send confirmation SMS
+            if message_lower in yes_responses:
+                confirmation_message = (
+                    f"✅ Confirmation Received / पुष्टि प्राप्त हुई\n\n"
+                    f"🎫 Ticket: {ticket_id}\n\n"
+                    f"Thank you for confirming! Your issue has been marked as COMPLETED.\n"
+                    f"पुष्टि के लिए धन्यवाद! आपका मुद्दा पूर्ण के रूप में चिह्नित किया गया है।\n\n"
+                    f"We're glad we could help!\n"
+                    f"हम खुश हैं कि हम मदद कर सके!"
+                )
+            else:
+                confirmation_message = (
+                    f"🔄 Feedback Received / प्रतिक्रिया प्राप्त हुई\n\n"
+                    f"🎫 Ticket: {ticket_id}\n\n"
+                    f"We understand the issue is not resolved yet. Status changed to IN PROGRESS.\n"
+                    f"हम समझते हैं कि समस्या अभी हल नहीं हुई है। स्थिति प्रगति में बदल दी गई है।\n\n"
+                    f"Our team will continue working on it.\n"
+                    f"हमारी टीम इस पर काम जारी रखेगी।"
+                )
+
+            print(f"📤 Sending confirmation SMS to {from_phone}")
+            telerivet_service.send_sms(from_phone, confirmation_message)
+
+            return {
+                "status": "success",
+                "message": "Confirmation processed",
+                "ticket_id": ticket_id,
+                "user_response": message_text,
+                "new_status": new_status
+            }
+
         print("=" * 50)
         print("📝 NEW ISSUE CREATION FLOW")
         print(f"   📱 From: {from_phone}")

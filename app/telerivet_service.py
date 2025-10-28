@@ -372,7 +372,23 @@ class TelerivetService:
                     "We will update you once completed.",
                     "पूर्ण होने पर हम आपको सूचित करेंगे।"
                 ])
-            elif new_status == "completed" or new_status == "admin_completed":
+            elif new_status == "admin_completed":
+                message_parts.extend([
+                    "✅ Work completed by our team!",
+                    "✅ हमारी टीम द्वारा कार्य पूर्ण किया गया!",
+                    "",
+                    "❓ Is the issue actually resolved?",
+                    "❓ क्या समस्या वास्तव में हल हो गई है?",
+                    "",
+                    "Please reply:",
+                    "कृपया जवाब दें:",
+                    "✓ YES (हाँ) - Issue resolved",
+                    "✗ NO (नहीं) - Issue not resolved",
+                    "",
+                    "Your feedback helps us serve you better!",
+                    "आपकी प्रतिक्रिया हमें बेहतर सेवा देने में मदद करती है!"
+                ])
+            elif new_status == "completed":
                 message_parts.extend([
                     "✅ Your issue has been resolved!",
                     "✅ आपका मुद्दा हल हो गया है!",
